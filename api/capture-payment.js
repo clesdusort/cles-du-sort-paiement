@@ -6,14 +6,10 @@
 //   1. GET  /v2/payment_intents/<pi_id>          → vérifie que le statut est "authorized"
 //   2. POST /v2/payment_intents/<pi_id>/capture  → déclenche la capture réelle des fonds
 //
-// ⚠️ CORRECTIF : endpoint aligné au PLURIEL (/payment_intents/) pour être cohérent avec
-// create-payment.js, qui crée l'intention sur /payment_intent/ (pluriel) et fonctionne
-// correctement (confirmé par un test réel : statut 200, module de paiement Stancer affiché
-// avec le bon montant). L'ancienne version de ce fichier utilisait /payment_intent/ (singulier)
-// pour relire le statut, ce qui ne correspondait pas à la ressource créée et provoquait une
-// erreur 502 ("Impossible de vérifier le paiement") à chaque tentative de capture.
+// ⚠️ Endpoint au PLURIEL (/payment_intents/), cohérent avec create-payment.js — confirmé
+// fonctionnel par un vrai test de bout en bout (statut "Payé" obtenu sur le dashboard Stancer).
 //
-// ⚠️ Sans l'appel de capture, l'argent reste juste "autorisé" (bloqué chez le Payeur)
+// ⚠️ Sans cet appel, l'argent reste juste "autorisé" (bloqué chez le Payeur)
 // mais jamais réellement débité — Carole ne serait jamais payée.
 
 const STANCER_API_BASE = 'https://api.stancer.com/v2';
@@ -65,7 +61,12 @@ export default async function handler(req, res) {
       return res.status(502).json({ error: 'Erreur lors de la capture', details: captureResult });
     }
 
-    return res.status(200).json({ success: true, status: captureResult.status || 'to_capture' });
+    return res.status(200).json({
+      success: true,
+      status: captureResult.status || 'to_capture',
+      amount: captureResult.amount,
+      description: captureResult.description,
+    });
 
   } catch (err) {
     console.error(err);
