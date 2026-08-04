@@ -33,15 +33,40 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { productId, email } = req.body;
-    const product = PRODUCTS[productId];
+    const body = req.body || {};
+    // On accepte "productIds" (tableau, cas normal quand plusieurs prestations sont
+    // sélectionnées) ou l'ancien "productId" (chaîne unique) pour compatibilité.
+    let productIds = body.productIds;
+    if (!productIds && body.productId) {
+      productIds = [body.productId];
+    }
+    const email = body.email;
 
-    if (!product) {
-      return res.status(400).json({ error: 'Prestation inconnue' });
+    if (!Array.isArray(productIds) || productIds.length === 0) {
+      return res.status(400).json({ error: 'Aucune prestation sélectionnée' });
     }
     if (!email) {
       return res.status(400).json({ error: 'Email requis' });
     }
+
+    // On élimine les doublons et on valide chaque prestation
+    const uniqueIds = [...new Set(productIds)];
+    const products = [];
+    for (const id of uniqueIds) {
+      const p = PRODUCTS[id];
+      if (!p) {
+        return res.status(400).json({ error: `Prestation inconnue : ${id}` });
+      }
+      products.push(p);
+    }
+
+    // Montant total = somme des prestations sélectionnées.
+    // ⚠️ Pour la Guidance Mensuelle, ce montant ne couvre que le prélèvement du jour ;
+    // cette intégration ne met pas en place de prélèvement automatique récurrent —
+    // les mois suivants restent à gérer manuellement (comme c'était déjà le cas avant).
+    const totalAmount = products.reduce((sum, p) => sum + p.amount, 0);
+    const description = products.map(p => p.label).join(' + ');
+    const currency = products[0].currency; // toutes nos prestations sont en EUR
 
     const secretKey = process.env.STANCER_SECRET_KEY;
     if (!secretKey) {
@@ -74,11 +99,11 @@ export default async function handler(req, res) {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        amount: product.amount,
-        currency: product.currency,
+        amount: totalAmount,
+        currency,
         customer: customer.id,
         capture: false, // autorisation uniquement — la capture se fait dans un second temps
-        description: product.label,
+        description,
       }),
     });
     const intent = await intentRes.json();
@@ -90,6 +115,9 @@ export default async function handler(req, res) {
     return res.status(200).json({
       paymentIntentId: intent.id,
       hppUrl: intent.url, // URL de la page de paiement hébergée, à afficher en iframe
+      totalAmount,
+      description,
+      products: uniqueIds,
     });
 
   } catch (err) {
