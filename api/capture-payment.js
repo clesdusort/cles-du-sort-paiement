@@ -2,11 +2,18 @@
 // Fonction serverless (Vercel) : confirme et capture un paiement Stancer
 // une fois que le Payeur a terminé la partie carte + 3D Secure dans l'iframe.
 //
-// Flux documenté par Stancer (https://docs.stancer.com/fr/API.html) :
-//   1. GET  /v2/payment_intent/<pi_id>          → vérifie que le statut est "authorized"
-//   2. POST /v2/payment_intent/<pi_id>/capture  → déclenche la capture réelle des fonds
+// Flux Stancer :
+//   1. GET  /v2/payment_intents/<pi_id>          → vérifie que le statut est "authorized"
+//   2. POST /v2/payment_intents/<pi_id>/capture  → déclenche la capture réelle des fonds
 //
-// ⚠️ Sans cet appel, l'argent reste juste "autorisé" (bloqué chez le Payeur)
+// ⚠️ CORRECTIF : endpoint aligné au PLURIEL (/payment_intents/) pour être cohérent avec
+// create-payment.js, qui crée l'intention sur /payment_intent/ (pluriel) et fonctionne
+// correctement (confirmé par un test réel : statut 200, module de paiement Stancer affiché
+// avec le bon montant). L'ancienne version de ce fichier utilisait /payment_intent/ (singulier)
+// pour relire le statut, ce qui ne correspondait pas à la ressource créée et provoquait une
+// erreur 502 ("Impossible de vérifier le paiement") à chaque tentative de capture.
+//
+// ⚠️ Sans l'appel de capture, l'argent reste juste "autorisé" (bloqué chez le Payeur)
 // mais jamais réellement débité — Carole ne serait jamais payée.
 
 const STANCER_API_BASE = 'https://api.stancer.com/v2';
@@ -32,7 +39,7 @@ export default async function handler(req, res) {
     const authHeader = 'Basic ' + Buffer.from(secretKey + ':').toString('base64');
 
     // 1. Vérifier le statut réel de l'intention de paiement
-    const statusRes = await fetch(`${STANCER_API_BASE}/payment_intent/${paymentIntentId}`, {
+    const statusRes = await fetch(`${STANCER_API_BASE}/payment_intents/${paymentIntentId}`, {
       headers: { 'Authorization': authHeader },
     });
     const intent = await statusRes.json();
@@ -49,7 +56,7 @@ export default async function handler(req, res) {
     }
 
     // 2. Capturer réellement les fonds
-    const captureRes = await fetch(`${STANCER_API_BASE}/payment_intent/${paymentIntentId}/capture`, {
+    const captureRes = await fetch(`${STANCER_API_BASE}/payment_intents/${paymentIntentId}/capture`, {
       method: 'POST',
       headers: { 'Authorization': authHeader },
     });
