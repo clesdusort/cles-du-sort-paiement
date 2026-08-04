@@ -14,9 +14,9 @@ const STANCER_API_BASE = 'https://api.stancer.com/v2'; // confirmé par la doc o
 // Tarifs des prestations — gardés ici, côté serveur, pour que le montant
 // ne puisse jamais être modifié depuis le navigateur du client.
 const PRODUCTS = {
-  mensuelle: { amount: 3499, label: 'Guidance Mensuelle', currency: 'eur' },
-  personnalisee: { amount: 3999, label: 'Guidance Personnalisée', currency: 'eur' },
-  anniversaire: { amount: 4999, label: 'Guidance Anniversaire', currency: 'eur' },
+  mensuelle: { amount: 3499, label: 'Guidance Mensuelle', shortLabel: 'Mensuelle', currency: 'eur' },
+  personnalisee: { amount: 3999, label: 'Guidance Personnalisée', shortLabel: 'Personnalisée', currency: 'eur' },
+  anniversaire: { amount: 4999, label: 'Guidance Anniversaire', shortLabel: 'Anniversaire', currency: 'eur' },
 };
 
 export default async function handler(req, res) {
@@ -65,7 +65,14 @@ export default async function handler(req, res) {
     // cette intégration ne met pas en place de prélèvement automatique récurrent —
     // les mois suivants restent à gérer manuellement (comme c'était déjà le cas avant).
     const totalAmount = products.reduce((sum, p) => sum + p.amount, 0);
-    const description = products.map(p => p.label).join(' + ');
+    // Stancer limite le champ "description" à 64 caractères max : on utilise des libellés
+    // courts pour la garder lisible même avec les 3 prestations sélectionnées, avec une
+    // troncature de sécurité au cas où (ex. si de nouvelles prestations sont ajoutées plus tard).
+    const fullLabels = products.map(p => p.label);
+    let description = products.map(p => p.shortLabel).join(' + ');
+    if (description.length > 64) {
+      description = description.slice(0, 61) + '...';
+    }
     const currency = products[0].currency; // toutes nos prestations sont en EUR
 
     const secretKey = process.env.STANCER_SECRET_KEY;
@@ -117,6 +124,7 @@ export default async function handler(req, res) {
       hppUrl: intent.url, // URL de la page de paiement hébergée, à afficher en iframe
       totalAmount,
       description,
+      productLabels: fullLabels,
       products: uniqueIds,
     });
 
