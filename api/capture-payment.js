@@ -122,6 +122,16 @@ export default async function handler(req, res) {
         });
 
         await envoyerEmailFacture({ to: email, prenom: clientInfo.prenom, client: clientInfo, invoiceNumber, description, amountEuros, pdfBytes, delais, cadeau, products });
+
+        // On garde aussi une copie dans Upstash, en attente que Carole l'archive dans son
+        // appli locale (bouton "📁 Archiver les factures") — jamais perdue, même si son
+        // ordinateur reste éteint plusieurs jours.
+        try {
+          await enregistrerFacturePourArchivage({ invoiceNumber, date: new Date(), pdfBytes });
+        } catch (archiveErr) {
+          console.error("Erreur d'enregistrement pour archivage (facture déjà envoyée, non bloquant) :", archiveErr);
+        }
+
         factureInfo = { invoiceNumber, envoyee: true };
       } catch (factureErr) {
         console.error('Erreur génération/envoi facture (paiement déjà confirmé, non bloquant) :', factureErr);
@@ -180,6 +190,39 @@ function construireListeDelais(products, dateCommande) {
 // via Upstash Redis (INCR est une opération atomique — fiable même si deux paiements
 // arrivent au même moment).
 // ---------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------
+// Stocke temporairement le PDF de la facture dans Upstash, en attendant que Carole
+// l'archive dans son appli locale (Année/Mois). Retiré de la liste d'attente une fois
+// confirmé récupéré — voir api/factures-en-attente.js et api/confirmer-archivage.js.
+// ---------------------------------------------------------------------------------
+async function enregistrerFacturePourArchivage({ invoiceNumber, date, pdfBytes }) {
+  const url = process.env.KV_REST_API_URL;
+  const token = process.env.KV_REST_API_TOKEN;
+  if (!url || !token) {
+    throw new Error('Upstash non configuré');
+  }
+  const pdfBase64 = Buffer.from(pdfBytes).toString('base64');
+  const moisNom = MOIS_FR[date.getMonth()];
+  const moisCapitalise = moisNom.charAt(0).toUpperCase() + moisNom.slice(1);
+  const record = JSON.stringify({
+    invoiceNumber,
+    annee: date.getFullYear(),
+    mois: moisCapitalise,
+    pdfBase64,
+  });
+
+  // On stocke le contenu de la facture...
+  await fetch(`${url}/set/facture_${invoiceNumber}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(record),
+  });
+  // ...et on ajoute son identifiant à la liste des factures en attente d'archivage.
+  await fetch(`${url}/sadd/factures_en_attente/facture_${invoiceNumber}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
 async function getNextInvoiceNumber(year) {
   const url = process.env.KV_REST_API_URL;
   const token = process.env.KV_REST_API_TOKEN;
@@ -255,7 +298,7 @@ async function genererFacturePDF({ invoiceNumber, date, client, description, amo
   y -= 30;
 
   page.drawLine({ start: { x: 50, y: y + 10 }, end: { x: 545, y: y + 10 }, thickness: 1, color: gray });
-  page.drawText('Total TTC', { x: 400, y, size: 12, font: fontBold, color: ink });
+  page.drawText('Total HT', { x: 400, y, size: 12, font: fontBold, color: ink });
   page.drawText(`${amountEuros} €`, { x: 470, y, size: 12, font: fontBold, color: ink });
   y -= 40;
 
