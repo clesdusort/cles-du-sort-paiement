@@ -42,7 +42,7 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Méthode non autorisée' });
 
   try {
-    const { paymentIntentId, email, client } = req.body || {};
+    const { paymentIntentId, email, client, products, cadeau } = req.body || {};
     if (!paymentIntentId) {
       return res.status(400).json({ error: 'paymentIntentId manquant' });
     }
@@ -91,6 +91,7 @@ export default async function handler(req, res) {
         const description = captureResult.description || intent.description || 'Guidance Clés du Sort';
 
         const clientInfo = client && client.nom ? client : { prenom: '', nom: email, adresse: '', codePostal: '', ville: '', pays: '' };
+        const delais = construireListeDelais(products, new Date());
 
         const pdfBytes = await genererFacturePDF({
           invoiceNumber,
@@ -100,7 +101,7 @@ export default async function handler(req, res) {
           amountEuros,
         });
 
-        await envoyerEmailFacture({ to: email, prenom: clientInfo.prenom, invoiceNumber, description, amountEuros, pdfBytes });
+        await envoyerEmailFacture({ to: email, prenom: clientInfo.prenom, invoiceNumber, description, amountEuros, pdfBytes, delais, cadeau, products });
         factureInfo = { invoiceNumber, envoyee: true };
       } catch (factureErr) {
         console.error('Erreur génération/envoi facture (paiement déjà confirmé, non bloquant) :', factureErr);
@@ -123,7 +124,38 @@ export default async function handler(req, res) {
 }
 
 // ---------------------------------------------------------------------------------
-// Compteur de facture séquentiel, sans trou ni doublon (obligation légale française),
+// Délai d'arrivée de la lettre par prestation — même règle exacte que celle déjà
+// utilisée dans l'appli locale de Carole (moisEligibleMensuelle) pour la Guidance
+// Mensuelle : inscription le 15 inclus -> mois suivant, le 16+ -> mois d'après.
+// Personnalisée/Anniversaire restent sur le délai fixe déjà annoncé sur le site
+// ("environ deux semaines"), pas de date précise promise.
+// ---------------------------------------------------------------------------------
+const MOIS_FR = ["janvier","février","mars","avril","mai","juin","juillet","août","septembre","octobre","novembre","décembre"];
+const LABELS_PRODUITS = {
+  mensuelle: 'Guidance Mensuelle',
+  personnalisee: 'Guidance Personnalisée',
+  anniversaire: 'Guidance Anniversaire',
+};
+
+function moisPremierEnvoiMensuelle(dateCommande) {
+  const jour = dateCommande.getDate();
+  const decalage = jour <= 15 ? 1 : 2;
+  const d = new Date(dateCommande.getFullYear(), dateCommande.getMonth() + decalage, 1);
+  return MOIS_FR[d.getMonth()];
+}
+
+function construireListeDelais(products, dateCommande) {
+  if (!Array.isArray(products) || products.length === 0) return [];
+  return products.map((id) => {
+    const label = LABELS_PRODUITS[id] || id;
+    if (id === 'mensuelle') {
+      return `${label} : ta première lettre arrivera en ${moisPremierEnvoiMensuelle(dateCommande)}`;
+    }
+    return `${label} : sous environ deux semaines`;
+  });
+}
+
+
 // via Upstash Redis (INCR est une opération atomique — fiable même si deux paiements
 // arrivent au même moment).
 // ---------------------------------------------------------------------------------
@@ -223,13 +255,27 @@ async function genererFacturePDF({ invoiceNumber, date, client, description, amo
 // Envoi de l'email de confirmation + facture jointe, via l'API Resend. Toujours en
 // copie cachée à Carole (archive personnelle + trace de chaque envoi).
 // ---------------------------------------------------------------------------------
-async function envoyerEmailFacture({ to, prenom, invoiceNumber, description, amountEuros, pdfBytes }) {
+async function envoyerEmailFacture({ to, prenom, invoiceNumber, description, amountEuros, pdfBytes, delais, cadeau, products }) {
   const resendKey = process.env.RESEND_API_KEY;
   if (!resendKey) {
     throw new Error('Clé Resend non configurée (RESEND_API_KEY manquante)');
   }
   const pdfBase64 = Buffer.from(pdfBytes).toString('base64');
+  const pluriel = Array.isArray(products) && products.length > 1;
   const salutation = prenom ? `Bonjour ${prenom}` : 'Bonjour';
+  const listeDelaisHtml = (delais && delais.length)
+    ? `<ul>${delais.map((ligne) => `<li>${ligne}</li>`).join('')}</ul>`
+    : '';
+
+  // Mention cadeau : précise où la lettre sera livrée si ce n'est pas chez l'acheteur.
+  const cadeauHtml = (cadeau && cadeau.nom)
+    ? `<p>Comme c'est un cadeau, cette lettre arrivera directement chez <strong>${cadeau.nom}</strong>, à l'adresse indiquée (${[cadeau.adresse, cadeau.codePostal, cadeau.ville].filter(Boolean).join(', ')}).</p>`
+    : '';
+
+  // Mention abonnement : uniquement si la Guidance Mensuelle fait partie de la commande.
+  const mensuelleHtml = (Array.isArray(products) && products.includes('mensuelle'))
+    ? `<p>Pour ta Guidance Mensuelle : le prélèvement suivant aura lieu automatiquement le 5 de chaque mois, sans que tu aies à refaire quoi que ce soit.</p>`
+    : '';
 
   const emailRes = await fetch('https://api.resend.com/emails', {
     method: 'POST',
@@ -241,13 +287,18 @@ async function envoyerEmailFacture({ to, prenom, invoiceNumber, description, amo
       from: FROM_EMAIL,
       to: [to],
       bcc: [BCC_EMAIL],
-      subject: `C'est confirmé ✨ — ta lettre est en préparation`,
+      subject: pluriel ? `C'est confirmé ✨ — tes lettres sont en préparation` : `C'est confirmé ✨ — ta lettre est en préparation`,
       html: `
         <p>${salutation}</p>
         <p>C'est noté, et c'est confirmé : ton paiement pour <strong>${description}</strong> (${amountEuros} €) est bien passé.</p>
+        <p>${pluriel ? 'Voici quand tu peux attendre tes lettres' : 'Voici quand tu peux attendre ta lettre'} :</p>
+        ${listeDelaisHtml}
+        ${cadeauHtml}
+        ${mensuelleHtml}
         <p>Ta facture est en pièce jointe, pour tes archives.</p>
-        <p>De mon côté, je m'attelle déjà à ta lettre. Elle prendra la route vers ta boîte aux lettres bientôt !</p>
+        <p>${pluriel ? "De mon côté, je m'attelle déjà à tes lettres. Elles prendront la route vers ta boîte aux lettres bientôt !" : "De mon côté, je m'attelle déjà à ta lettre. Elle prendra la route vers ta boîte aux lettres bientôt !"}</p>
         <p>À très vite,<br>Clés du Sort.</p>
+        <p style="font-size:12px; color:#888; margin-top:24px;">Ceci est un message automatique, merci de ne pas y répondre directement. Pour toute question, contacte-nous à cles.dusort@gmail.com.</p>
       `,
       attachments: [
         { filename: `Facture_${invoiceNumber}.pdf`, content: pdfBase64 },
