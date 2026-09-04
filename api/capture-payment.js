@@ -90,7 +90,7 @@ export default async function handler(req, res) {
         const amountEuros = (amountCents / 100).toFixed(2).replace('.', ',');
         const description = captureResult.description || intent.description || 'Guidance Clés du Sort';
 
-        const clientInfo = client && client.nom ? client : { nom: email, adresse: '', codePostal: '', ville: '', pays: '' };
+        const clientInfo = client && client.nom ? client : { prenom: '', nom: email, adresse: '', codePostal: '', ville: '', pays: '' };
 
         const pdfBytes = await genererFacturePDF({
           invoiceNumber,
@@ -100,7 +100,7 @@ export default async function handler(req, res) {
           amountEuros,
         });
 
-        await envoyerEmailFacture({ to: email, invoiceNumber, description, amountEuros, pdfBytes });
+        await envoyerEmailFacture({ to: email, prenom: clientInfo.prenom, invoiceNumber, description, amountEuros, pdfBytes });
         factureInfo = { invoiceNumber, envoyee: true };
       } catch (factureErr) {
         console.error('Erreur génération/envoi facture (paiement déjà confirmé, non bloquant) :', factureErr);
@@ -223,12 +223,13 @@ async function genererFacturePDF({ invoiceNumber, date, client, description, amo
 // Envoi de l'email de confirmation + facture jointe, via l'API Resend. Toujours en
 // copie cachée à Carole (archive personnelle + trace de chaque envoi).
 // ---------------------------------------------------------------------------------
-async function envoyerEmailFacture({ to, invoiceNumber, description, amountEuros, pdfBytes }) {
+async function envoyerEmailFacture({ to, prenom, invoiceNumber, description, amountEuros, pdfBytes }) {
   const resendKey = process.env.RESEND_API_KEY;
   if (!resendKey) {
     throw new Error('Clé Resend non configurée (RESEND_API_KEY manquante)');
   }
   const pdfBase64 = Buffer.from(pdfBytes).toString('base64');
+  const salutation = prenom ? `Bonjour ${prenom}` : 'Bonjour';
 
   const emailRes = await fetch('https://api.resend.com/emails', {
     method: 'POST',
@@ -240,12 +241,13 @@ async function envoyerEmailFacture({ to, invoiceNumber, description, amountEuros
       from: FROM_EMAIL,
       to: [to],
       bcc: [BCC_EMAIL],
-      subject: `Ta facture Clés du Sort — n° ${invoiceNumber}`,
+      subject: `C'est confirmé ✨ — ta lettre est en préparation`,
       html: `
-        <p>Bonjour,</p>
-        <p>Merci pour ta commande (<strong>${description}</strong>), d'un montant de <strong>${amountEuros} €</strong>.</p>
-        <p>Tu trouveras ta facture en pièce jointe de cet email.</p>
-        <p>À très vite,<br>Clés du Sort</p>
+        <p>${salutation}</p>
+        <p>C'est noté, et c'est confirmé : ton paiement pour <strong>${description}</strong> (${amountEuros} €) est bien passé.</p>
+        <p>Ta facture est en pièce jointe, pour tes archives.</p>
+        <p>De mon côté, je m'attelle déjà à ta lettre. Elle prendra la route vers ta boîte aux lettres bientôt !</p>
+        <p>À très vite,<br>Clés du Sort.</p>
       `,
       attachments: [
         { filename: `Facture_${invoiceNumber}.pdf`, content: pdfBase64 },
