@@ -111,7 +111,13 @@ export default async function handler(req, res) {
           : (captureResult.description || intent.description || 'Guidance Clés du Sort');
 
         const clientInfo = client && client.nom ? client : { prenom: '', nom: email, adresse: '', codePostal: '', ville: '', pays: '' };
-        const delais = construireListeDelais(products, new Date());
+
+        // ⚠️ cadeau.produit contient le LIBELLÉ COMPLET de la prestation concernée (ex.
+        // "Guidance Mensuelle"), tel que renseigné dans le formulaire — on le fait correspondre
+        // à l'id interne (mensuelle/personnalisee/anniversaire) pour savoir dans quelle puce de
+        // la liste des Guidances glisser la mention cadeau.
+        const cadeauProduitId = (cadeau && cadeau.produit) ? PRODUIT_ID_PAR_LABEL[cadeau.produit] || null : null;
+        const blocsGuidances = construireBlocsGuidances(products, new Date(), clientInfo, cadeauProduitId, cadeau);
 
         const pdfBytes = await genererFacturePDF({
           invoiceNumber,
@@ -121,7 +127,7 @@ export default async function handler(req, res) {
           amountEuros,
         });
 
-        await envoyerEmailFacture({ to: email, prenom: clientInfo.prenom, client: clientInfo, invoiceNumber, description, amountEuros, pdfBytes, delais, cadeau, products });
+        await envoyerEmailFacture({ to: email, prenom: clientInfo.prenom, invoiceNumber, description, amountEuros, pdfBytes, blocsGuidances, products });
 
         // On garde aussi une copie dans Upstash, en attente que Carole l'archive dans son
         // appli locale (bouton "📁 Archiver les factures") — jamais perdue, même si son
@@ -175,14 +181,49 @@ function moisPremierEnvoiMensuelle(dateCommande) {
   return `${moisCapitalise} ${d.getFullYear()}`;
 }
 
-function construireListeDelais(products, dateCommande) {
+// Reconstruit l'id interne (mensuelle/personnalisee/anniversaire) à partir du libellé complet
+// envoyé par le formulaire pour le champ "laquelle est cadeau" (ex. "Guidance Mensuelle").
+const PRODUIT_ID_PAR_LABEL = Object.fromEntries(
+  Object.entries(LABELS_PRODUITS).map(([id, label]) => [label, id])
+);
+
+// Adresse "compacte" façon vraie adresse postale (code postal + ville regroupés par un espace) —
+// utilisée pour l'adresse de l'acheteur.
+function formatAdresseClient(personne) {
+  const cpVille = [personne.codePostal, personne.ville].filter(Boolean).join(' ');
+  return [personne.adresse, cpVille, personne.pays].filter(Boolean).join(', ');
+}
+
+// Adresse cadeau : chaque champ listé séparément (déjà le format utilisé jusqu'ici pour cette
+// mention), avec le pays ajouté à la fin.
+function formatAdresseCadeau(personne) {
+  return [personne.adresse, personne.codePostal, personne.ville, personne.pays].filter(Boolean).join(', ');
+}
+
+// Un bloc = une puce complète de l'email, par Guidance commandée : délai d'arrivée + adresse de
+// livraison (celle du cadeau si CETTE Guidance précise est le cadeau, sinon celle de l'acheteur)
+// + mention du prélèvement automatique si c'est la Guidance Mensuelle. Tout regroupé au même
+// endroit pour que ce soit lisible d'un coup d'œil, Guidance par Guidance.
+function construireBlocsGuidances(products, dateCommande, client, cadeauProduitId, cadeau) {
   if (!Array.isArray(products) || products.length === 0) return [];
   return products.map((id) => {
     const label = LABELS_PRODUITS[id] || id;
+    const estCadeauPourCetteGuidance = Boolean(cadeau) && cadeauProduitId === id;
+
+    let texte;
     if (id === 'mensuelle') {
-      return `${label} : ta première lettre arrivera en ${moisPremierEnvoiMensuelle(dateCommande)}`;
+      texte = `${label} : ta première lettre arrivera en ${moisPremierEnvoiMensuelle(dateCommande)}`;
+      texte += estCadeauPourCetteGuidance
+        ? `. Comme c'est un cadeau, cette lettre arrivera directement chez ${cadeau.nom}, à l'adresse indiquée (${formatAdresseCadeau(cadeau)}).`
+        : (client && client.nom ? ` à l'adresse suivante : ${client.nom}, ${formatAdresseClient(client)}.` : '.');
+      texte += ' Le prélèvement suivant aura lieu automatiquement le 5 de chaque mois, sans que tu aies à refaire quoi que ce soit.';
+    } else {
+      texte = `${label} : sous environ deux semaines`;
+      texte += estCadeauPourCetteGuidance
+        ? `. Comme c'est un cadeau, cette lettre arrivera directement chez ${cadeau.nom}, à l'adresse indiquée (${formatAdresseCadeau(cadeau)}).`
+        : (client && client.nom ? `, à l'adresse suivante : ${client.nom}, ${formatAdresseClient(client)}.` : '.');
     }
-    return `${label} : sous environ deux semaines`;
+    return texte;
   });
 }
 
@@ -212,10 +253,13 @@ async function enregistrerFacturePourArchivage({ invoiceNumber, date, pdfBytes }
   });
 
   // On stocke le contenu de la facture...
+  // ⚠️ `record` est DÉJÀ une chaîne JSON (JSON.stringify plus haut) : l'API Upstash attend
+  // cette valeur brute comme body, pas une seconde couche de JSON.stringify (sinon chaque
+  // guillemet se retrouve échappé une fois de trop -> "double encodage").
   await fetch(`${url}/set/facture_${invoiceNumber}`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(record),
+    body: record,
   });
   // ...et on ajoute son identifiant à la liste des factures en attente d'archivage.
   await fetch(`${url}/sadd/factures_en_attente/facture_${invoiceNumber}`, {
@@ -319,7 +363,7 @@ async function genererFacturePDF({ invoiceNumber, date, client, description, amo
 // Envoi de l'email de confirmation + facture jointe, via l'API Resend. Toujours en
 // copie cachée à Carole (archive personnelle + trace de chaque envoi).
 // ---------------------------------------------------------------------------------
-async function envoyerEmailFacture({ to, prenom, client, invoiceNumber, description, amountEuros, pdfBytes, delais, cadeau, products }) {
+async function envoyerEmailFacture({ to, prenom, invoiceNumber, description, amountEuros, pdfBytes, blocsGuidances, products }) {
   const resendKey = process.env.RESEND_API_KEY;
   if (!resendKey) {
     throw new Error('Clé Resend non configurée (RESEND_API_KEY manquante)');
@@ -327,27 +371,12 @@ async function envoyerEmailFacture({ to, prenom, client, invoiceNumber, descript
   const pdfBase64 = Buffer.from(pdfBytes).toString('base64');
   const pluriel = Array.isArray(products) && products.length > 1;
   const salutation = prenom ? `Bonjour ${prenom}` : 'Bonjour';
-  const listeDelaisHtml = (delais && delais.length)
-    ? `<ul>${delais.map((ligne) => `<li>${ligne}</li>`).join('')}</ul>`
-    : '';
 
-  // Mention cadeau : précise où la lettre sera livrée si ce n'est pas chez l'acheteur.
-  const cadeauHtml = (cadeau && cadeau.nom)
-    ? `<p>Comme c'est un cadeau, cette lettre arrivera directement chez <strong>${cadeau.nom}</strong>, à l'adresse indiquée (${[cadeau.adresse, cadeau.codePostal, cadeau.ville].filter(Boolean).join(', ')}).</p>`
-    : '';
-
-  // Mention abonnement : uniquement si la Guidance Mensuelle fait partie de la commande.
-  const mensuelleHtml = (Array.isArray(products) && products.includes('mensuelle'))
-    ? `<p>Pour ta Guidance Mensuelle : le prélèvement suivant aura lieu automatiquement le 5 de chaque mois, sans que tu aies à refaire quoi que ce soit.</p>`
-    : '';
-
-  // Récapitulatif des coordonnées postales de l'acheteur (utile pour qu'elle puisse
-  // vérifier tout de suite qu'il n'y a pas d'erreur avant l'envoi de la lettre).
-  const clientHtml = (client && client.nom)
-    ? `<p><strong>Tes coordonnées enregistrées :</strong><br>
-        ${client.nom}<br>
-        ${[client.adresse, [client.codePostal, client.ville].filter(Boolean).join(' '), client.pays].filter(Boolean).join('<br>')}
-      </p>`
+  // Chaque Guidance a sa propre puce (délai + adresse de livraison + mention prélèvement le
+  // cas échéant), pour que tout soit lisible Guidance par Guidance plutôt qu'éclaté en
+  // plusieurs paragraphes séparés.
+  const listeGuidancesHtml = (blocsGuidances && blocsGuidances.length)
+    ? `<ul>${blocsGuidances.map((ligne) => `<li>${ligne}</li>`).join('')}</ul>`
     : '';
 
   const descriptionAvecArticle = (Array.isArray(products) && products.length)
@@ -367,13 +396,9 @@ async function envoyerEmailFacture({ to, prenom, client, invoiceNumber, descript
       subject: pluriel ? `C'est confirmé ✨ — tes lettres sont en préparation` : `C'est confirmé ✨ — ta lettre est en préparation`,
       html: `
         <p>${salutation}</p>
-        <p>C'est noté, et c'est confirmé : ton paiement pour <strong>${descriptionAvecArticle}</strong> (${amountEuros} €) est bien passé.</p>
+        <p>C'est noté, et c'est confirmé : ton paiement pour <strong>${descriptionAvecArticle}</strong> (${amountEuros} €) est bien passé. Ta facture est en pièce jointe, pour tes archives.</p>
         <p>${pluriel ? 'Voici quand tu peux attendre tes lettres' : 'Voici quand tu peux attendre ta lettre'} :</p>
-        ${listeDelaisHtml}
-        ${clientHtml}
-        ${cadeauHtml}
-        ${mensuelleHtml}
-        <p>Ta facture est en pièce jointe, pour tes archives.</p>
+        ${listeGuidancesHtml}
         <p>${pluriel ? "De mon côté, je m'attelle déjà à tes lettres. Elles prendront la route vers ta boîte aux lettres bientôt !" : "De mon côté, je m'attelle déjà à ta lettre. Elle prendra la route vers ta boîte aux lettres bientôt !"}</p>
         <p>À très vite,<br>Clés du Sort.</p>
         <p style="font-size:12px; color:#888; margin-top:24px;">Ceci est un message automatique, merci de ne pas y répondre directement. Pour toute question, contacte-nous à cles.dusort@gmail.com.</p>
