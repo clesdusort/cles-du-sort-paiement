@@ -112,12 +112,14 @@ export default async function handler(req, res) {
 
         const clientInfo = client && client.nom ? client : { prenom: '', nom: email, adresse: '', codePostal: '', ville: '', pays: '' };
 
-        // ⚠️ cadeau.produit contient le LIBELLÉ COMPLET de la prestation concernée (ex.
-        // "Guidance Mensuelle"), tel que renseigné dans le formulaire — on le fait correspondre
-        // à l'id interne (mensuelle/personnalisee/anniversaire) pour savoir dans quelle puce de
-        // la liste des Guidances glisser la mention cadeau.
-        const cadeauProduitId = (cadeau && cadeau.produit) ? PRODUIT_ID_PAR_LABEL[cadeau.produit] || null : null;
-        const blocsGuidances = construireBlocsGuidances(products, new Date(), clientInfo, cadeauProduitId, cadeau);
+        // ⚠️ cadeau.produits contient les libellés COMPLETS (avec prix) de TOUTES les
+        // prestations cochées comme cadeau — une commande peut avoir plusieurs Guidances
+        // offertes à la fois, envoyées au même destinataire. On les convertit en ids internes
+        // pour savoir dans quelle(s) puce(s) glisser la mention cadeau.
+        const cadeauProduitIds = (cadeau && Array.isArray(cadeau.produits))
+          ? cadeau.produits.map(idProduitDepuisLibelle).filter(Boolean)
+          : [];
+        const blocsGuidances = construireBlocsGuidances(products, new Date(), clientInfo, cadeauProduitIds, cadeau);
 
         const pdfBytes = await genererFacturePDF({
           invoiceNumber,
@@ -181,11 +183,18 @@ function moisPremierEnvoiMensuelle(dateCommande) {
   return `${moisCapitalise} ${d.getFullYear()}`;
 }
 
-// Reconstruit l'id interne (mensuelle/personnalisee/anniversaire) à partir du libellé complet
-// envoyé par le formulaire pour le champ "laquelle est cadeau" (ex. "Guidance Mensuelle").
-const PRODUIT_ID_PAR_LABEL = Object.fromEntries(
-  Object.entries(LABELS_PRODUITS).map(([id, label]) => [label, id])
-);
+// Retrouve l'id interne (mensuelle/personnalisee/anniversaire) à partir d'un libellé de
+// prestation tel qu'envoyé par le formulaire. ⚠️ Ces libellés incluent le prix (ex. "Guidance
+// Anniversaire à (s')offrir -  49,99e"), donc on matche par mot-clé plutôt que par égalité
+// stricte — reste robuste si le prix ou la formulation exacte change un jour.
+function idProduitDepuisLibelle(libelle) {
+  if (!libelle) return null;
+  const l = libelle.toLowerCase();
+  if (l.includes('mensuelle')) return 'mensuelle';
+  if (l.includes('personnalis')) return 'personnalisee'; // couvre "personnalisée" et "personnalisee"
+  if (l.includes('anniversaire')) return 'anniversaire';
+  return null;
+}
 
 // Adresse "compacte" façon vraie adresse postale (code postal + ville regroupés par un espace) —
 // utilisée pour l'adresse de l'acheteur.
@@ -204,11 +213,11 @@ function formatAdresseCadeau(personne) {
 // livraison (celle du cadeau si CETTE Guidance précise est le cadeau, sinon celle de l'acheteur)
 // + mention du prélèvement automatique si c'est la Guidance Mensuelle. Tout regroupé au même
 // endroit pour que ce soit lisible d'un coup d'œil, Guidance par Guidance.
-function construireBlocsGuidances(products, dateCommande, client, cadeauProduitId, cadeau) {
+function construireBlocsGuidances(products, dateCommande, client, cadeauProduitIds, cadeau) {
   if (!Array.isArray(products) || products.length === 0) return [];
   return products.map((id) => {
     const label = LABELS_PRODUITS[id] || id;
-    const estCadeauPourCetteGuidance = Boolean(cadeau) && cadeauProduitId === id;
+    const estCadeauPourCetteGuidance = Boolean(cadeau) && cadeauProduitIds.includes(id);
 
     let texte;
     if (id === 'mensuelle') {
