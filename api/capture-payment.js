@@ -102,7 +102,13 @@ export default async function handler(req, res) {
         const invoiceNumber = await getNextInvoiceNumber(year);
         const amountCents = captureResult.amount || intent.amount || 0;
         const amountEuros = (amountCents / 100).toFixed(2).replace('.', ',');
-        const description = captureResult.description || intent.description || 'Guidance Clés du Sort';
+        // ⚠️ captureResult.description est la version COURTE (ex. "Mensuelle + Anniversaire"),
+        // imposée par la limite de 64 caractères de Stancer — jamais montrée à la cliente.
+        // Pour l'email et la facture, on reconstruit une version complète ("Guidance Mensuelle...")
+        // à partir de la vraie liste des produits.
+        const description = (Array.isArray(products) && products.length)
+          ? products.map((id) => LABELS_PRODUITS[id] || id).join(' + ')
+          : (captureResult.description || intent.description || 'Guidance Clés du Sort');
 
         const clientInfo = client && client.nom ? client : { prenom: '', nom: email, adresse: '', codePostal: '', ville: '', pays: '' };
         const delais = construireListeDelais(products, new Date());
@@ -115,7 +121,7 @@ export default async function handler(req, res) {
           amountEuros,
         });
 
-        await envoyerEmailFacture({ to: email, prenom: clientInfo.prenom, invoiceNumber, description, amountEuros, pdfBytes, delais, cadeau, products });
+        await envoyerEmailFacture({ to: email, prenom: clientInfo.prenom, client: clientInfo, invoiceNumber, description, amountEuros, pdfBytes, delais, cadeau, products });
         factureInfo = { invoiceNumber, envoyee: true };
       } catch (factureErr) {
         console.error('Erreur génération/envoi facture (paiement déjà confirmé, non bloquant) :', factureErr);
@@ -155,7 +161,8 @@ function moisPremierEnvoiMensuelle(dateCommande) {
   const jour = dateCommande.getDate();
   const decalage = jour <= 15 ? 1 : 2;
   const d = new Date(dateCommande.getFullYear(), dateCommande.getMonth() + decalage, 1);
-  return MOIS_FR[d.getMonth()];
+  const moisCapitalise = MOIS_FR[d.getMonth()].charAt(0).toUpperCase() + MOIS_FR[d.getMonth()].slice(1);
+  return `${moisCapitalise} ${d.getFullYear()}`;
 }
 
 function construireListeDelais(products, dateCommande) {
@@ -269,7 +276,7 @@ async function genererFacturePDF({ invoiceNumber, date, client, description, amo
 // Envoi de l'email de confirmation + facture jointe, via l'API Resend. Toujours en
 // copie cachée à Carole (archive personnelle + trace de chaque envoi).
 // ---------------------------------------------------------------------------------
-async function envoyerEmailFacture({ to, prenom, invoiceNumber, description, amountEuros, pdfBytes, delais, cadeau, products }) {
+async function envoyerEmailFacture({ to, prenom, client, invoiceNumber, description, amountEuros, pdfBytes, delais, cadeau, products }) {
   const resendKey = process.env.RESEND_API_KEY;
   if (!resendKey) {
     throw new Error('Clé Resend non configurée (RESEND_API_KEY manquante)');
@@ -291,6 +298,15 @@ async function envoyerEmailFacture({ to, prenom, invoiceNumber, description, amo
     ? `<p>Pour ta Guidance Mensuelle : le prélèvement suivant aura lieu automatiquement le 5 de chaque mois, sans que tu aies à refaire quoi que ce soit.</p>`
     : '';
 
+  // Récapitulatif des coordonnées postales de l'acheteur (utile pour qu'elle puisse
+  // vérifier tout de suite qu'il n'y a pas d'erreur avant l'envoi de la lettre).
+  const clientHtml = (client && client.nom)
+    ? `<p><strong>Tes coordonnées enregistrées :</strong><br>
+        ${client.nom}<br>
+        ${[client.adresse, [client.codePostal, client.ville].filter(Boolean).join(' '), client.pays].filter(Boolean).join('<br>')}
+      </p>`
+    : '';
+
   const emailRes = await fetch('https://api.resend.com/emails', {
     method: 'POST',
     headers: {
@@ -307,6 +323,7 @@ async function envoyerEmailFacture({ to, prenom, invoiceNumber, description, amo
         <p>C'est noté, et c'est confirmé : ton paiement pour <strong>${description}</strong> (${amountEuros} €) est bien passé.</p>
         <p>${pluriel ? 'Voici quand tu peux attendre tes lettres' : 'Voici quand tu peux attendre ta lettre'} :</p>
         ${listeDelaisHtml}
+        ${clientHtml}
         ${cadeauHtml}
         ${mensuelleHtml}
         <p>Ta facture est en pièce jointe, pour tes archives.</p>
