@@ -307,6 +307,10 @@ async function envoyerEmailFacture({ to, prenom, client, invoiceNumber, descript
       </p>`
     : '';
 
+  const descriptionAvecArticle = (Array.isArray(products) && products.length)
+    ? products.map((id) => `la ${LABELS_PRODUITS[id] || id}`).join(' + ')
+    : description;
+
   const emailRes = await fetch('https://api.resend.com/emails', {
     method: 'POST',
     headers: {
@@ -320,7 +324,7 @@ async function envoyerEmailFacture({ to, prenom, client, invoiceNumber, descript
       subject: pluriel ? `C'est confirmé ✨ — tes lettres sont en préparation` : `C'est confirmé ✨ — ta lettre est en préparation`,
       html: `
         <p>${salutation}</p>
-        <p>C'est noté, et c'est confirmé : ton paiement pour <strong>${description}</strong> (${amountEuros} €) est bien passé.</p>
+        <p>C'est noté, et c'est confirmé : ton paiement pour <strong>${descriptionAvecArticle}</strong> (${amountEuros} €) est bien passé.</p>
         <p>${pluriel ? 'Voici quand tu peux attendre tes lettres' : 'Voici quand tu peux attendre ta lettre'} :</p>
         ${listeDelaisHtml}
         ${clientHtml}
