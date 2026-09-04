@@ -62,6 +62,20 @@ export default async function handler(req, res) {
       return res.status(502).json({ error: 'Impossible de vérifier le paiement', details: intent });
     }
 
+    // ⚠️ Idempotence : si ce paiement a déjà été capturé (ex. double appel de capture-payment
+    // pour la même intention — même quelques millisecondes d'écart), on ne doit surtout PAS
+    // regénérer une facture ni renvoyer un email une deuxième fois. On confirme juste le succès.
+    const statutsDejaTraites = ['captured', 'to_capture', 'capture_sent'];
+    if (statutsDejaTraites.includes(intent.status)) {
+      return res.status(200).json({
+        success: true,
+        status: intent.status,
+        amount: intent.amount,
+        description: intent.description,
+        facture: { dejaEnvoyee: true },
+      });
+    }
+
     if (intent.status !== 'authorized') {
       return res.status(409).json({
         error: `Le paiement n'est pas prêt à être capturé (statut actuel : ${intent.status}).`,
