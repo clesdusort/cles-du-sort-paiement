@@ -22,7 +22,11 @@ import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 const STANCER_API_BASE = 'https://api.stancer.com/v2';
 
 // Informations fixes de l'émetteur (Carole Mlakar / Clés du Sort), reprises des mentions légales.
+// ⚠️ Le nom commercial ("Clés du Sort") est affiché en PLUS de l'identité légale, jamais à sa
+// place : pour une EI, le nom+prénom et la mention EI doivent toujours rester visibles sur la
+// facture (obligation légale, pas une question de mise en page).
 const EMETTEUR = {
+  nomCommercial: 'Clés du Sort',
   nom: 'Carole Mlakar',
   statut: 'Entrepreneur Individuel (EI)',
   siret: 'SIRET : 107 760 522 00014',
@@ -125,6 +129,7 @@ export default async function handler(req, res) {
           invoiceNumber,
           date: new Date(),
           client: clientInfo,
+          products,
           description,
           amountEuros,
         });
@@ -173,6 +178,14 @@ const LABELS_PRODUITS = {
   mensuelle: 'Guidance Mensuelle',
   personnalisee: 'Guidance Personnalisée',
   anniversaire: 'Guidance Anniversaire',
+};
+// ⚠️ Tarifs unitaires (en centimes), doivent rester identiques à ceux affichés dans paiement.html
+// (const PRODUCTS) et fixés côté serveur dans create-payment.js — utilisés ici uniquement pour
+// détailler le prix de chaque Guidance ligne par ligne sur la facture PDF.
+const PRIX_PRODUITS_CENTIMES = {
+  mensuelle: 3499,
+  personnalisee: 3999,
+  anniversaire: 4999,
 };
 
 function moisPremierEnvoiMensuelle(dateCommande) {
@@ -297,7 +310,7 @@ async function getNextInvoiceNumber(year) {
 // Génération du PDF de facture (mentions légales obligatoires pour un auto-entrepreneur
 // en franchise en base de TVA, vente B2C > 25€).
 // ---------------------------------------------------------------------------------
-async function genererFacturePDF({ invoiceNumber, date, client, description, amountEuros }) {
+async function genererFacturePDF({ invoiceNumber, date, client, products, description, amountEuros }) {
   const pdfDoc = await PDFDocument.create();
   const page = pdfDoc.addPage([595.28, 841.89]); // A4 en points
   const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
@@ -319,6 +332,8 @@ async function genererFacturePDF({ invoiceNumber, date, client, description, amo
   // Bloc émetteur
   page.drawText('Émetteur', { x: 50, y, size: 9, font: fontBold, color: gray });
   y -= 16;
+  page.drawText(EMETTEUR.nomCommercial, { x: 50, y, size: 12, font: fontBold, color: ink });
+  y -= 17;
   [EMETTEUR.nom, EMETTEUR.statut, EMETTEUR.siret, EMETTEUR.adresse].forEach((ligne) => {
     page.drawText(ligne, { x: 50, y, size: 11, font, color: black });
     y -= 15;
@@ -338,7 +353,8 @@ async function genererFacturePDF({ invoiceNumber, date, client, description, amo
 
   y -= 40;
 
-  // Tableau prestation
+  // Tableau prestations — une ligne par Guidance commandée, avec son propre prix, le total
+  // regroupé arrivant tout en bas.
   page.drawLine({ start: { x: 50, y: y + 10 }, end: { x: 545, y: y + 10 }, thickness: 1, color: gray });
   page.drawText('Description', { x: 50, y, size: 10, font: fontBold, color: black });
   page.drawText('Montant', { x: 470, y, size: 10, font: fontBold, color: black });
@@ -346,9 +362,19 @@ async function genererFacturePDF({ invoiceNumber, date, client, description, amo
   page.drawLine({ start: { x: 50, y }, end: { x: 545, y }, thickness: 1, color: gray });
   y -= 22;
 
-  page.drawText(description, { x: 50, y, size: 11, font, color: black, maxWidth: 380 });
-  page.drawText(`${amountEuros} €`, { x: 470, y, size: 11, font, color: black });
-  y -= 30;
+  const lignesPrestations = (Array.isArray(products) && products.length)
+    ? products.map((id) => ({
+        label: LABELS_PRODUITS[id] || id,
+        montant: ((PRIX_PRODUITS_CENTIMES[id] || 0) / 100).toFixed(2).replace('.', ','),
+      }))
+    : [{ label: description, montant: amountEuros }]; // filet de sécurité si products absent
+
+  lignesPrestations.forEach((ligne) => {
+    page.drawText(ligne.label, { x: 50, y, size: 11, font, color: black, maxWidth: 380 });
+    page.drawText(`${ligne.montant} €`, { x: 470, y, size: 11, font, color: black });
+    y -= 22;
+  });
+  y -= 8;
 
   page.drawLine({ start: { x: 50, y: y + 10 }, end: { x: 545, y: y + 10 }, thickness: 1, color: gray });
   page.drawText('Total HT', { x: 400, y, size: 12, font: fontBold, color: ink });
