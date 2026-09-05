@@ -140,7 +140,7 @@ export default async function handler(req, res) {
         // appli locale (bouton "📁 Archiver les factures") — jamais perdue, même si son
         // ordinateur reste éteint plusieurs jours.
         try {
-          await enregistrerFacturePourArchivage({ invoiceNumber, date: new Date(), pdfBytes });
+          await enregistrerFacturePourArchivage({ invoiceNumber, date: new Date(), pdfBytes, clientNom: clientInfo.nom });
         } catch (archiveErr) {
           console.error("Erreur d'enregistrement pour archivage (facture déjà envoyée, non bloquant) :", archiveErr);
         }
@@ -258,7 +258,7 @@ function construireBlocsGuidances(products, dateCommande, client, cadeauProduitI
 // l'archive dans son appli locale (Année/Mois). Retiré de la liste d'attente une fois
 // confirmé récupéré — voir api/factures-en-attente.js et api/confirmer-archivage.js.
 // ---------------------------------------------------------------------------------
-async function enregistrerFacturePourArchivage({ invoiceNumber, date, pdfBytes }) {
+async function enregistrerFacturePourArchivage({ invoiceNumber, date, pdfBytes, clientNom }) {
   const url = process.env.KV_REST_API_URL;
   const token = process.env.KV_REST_API_TOKEN;
   if (!url || !token) {
@@ -271,6 +271,7 @@ async function enregistrerFacturePourArchivage({ invoiceNumber, date, pdfBytes }
     invoiceNumber,
     annee: date.getFullYear(),
     mois: moisCapitalise,
+    clientNom: clientNom || '',
     pdfBase64,
   });
 
