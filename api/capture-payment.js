@@ -226,7 +226,11 @@ function formatAdresseCadeau(personne) {
 // livraison (celle du cadeau si CETTE Guidance précise est le cadeau, sinon celle de l'acheteur)
 // + mention du prélèvement automatique si c'est la Guidance Mensuelle. Tout regroupé au même
 // endroit pour que ce soit lisible d'un coup d'œil, Guidance par Guidance.
-function construireBlocsGuidances(products, dateCommande, client, cadeauProduitIds, cadeau) {
+// estPremierPaiement (par défaut true) : distingue le tout premier paiement (celui qui
+// passe par le site, via inscription.html -> paiement.html) d'un futur prélèvement récurrent
+// du 5 du mois. Le futur moteur de prélèvement automatique (pas encore construit) devra
+// appeler cette même fonction avec estPremierPaiement=false pour les mois suivants.
+function construireBlocsGuidances(products, dateCommande, client, cadeauProduitIds, cadeau, estPremierPaiement = true) {
   if (!Array.isArray(products) || products.length === 0) return [];
   return products.map((id) => {
     const label = LABELS_PRODUITS[id] || id;
@@ -234,7 +238,9 @@ function construireBlocsGuidances(products, dateCommande, client, cadeauProduitI
 
     let texte;
     if (id === 'mensuelle') {
-      texte = `${label} : ta première lettre arrivera en ${moisPremierEnvoiMensuelle(dateCommande)}`;
+      texte = estPremierPaiement
+        ? `${label} : ta première lettre arrivera en ${moisPremierEnvoiMensuelle(dateCommande)}`
+        : `${label} : ta lettre de ce mois-ci est en préparation`;
       texte += estCadeauPourCetteGuidance
         ? `. Comme c'est un cadeau, cette lettre arrivera directement chez ${cadeau.nom}, à l'adresse indiquée (${formatAdresseCadeau(cadeau)}).`
         : (client && client.nom ? ` à l'adresse suivante : ${client.nom}, ${formatAdresseClient(client)}.` : '.');
@@ -249,10 +255,6 @@ function construireBlocsGuidances(products, dateCommande, client, cadeauProduitI
   });
 }
 
-
-// via Upstash Redis (INCR est une opération atomique — fiable même si deux paiements
-// arrivent au même moment).
-// ---------------------------------------------------------------------------------
 // ---------------------------------------------------------------------------------
 // Stocke temporairement le PDF de la facture dans Upstash, en attendant que Carole
 // l'archive dans son appli locale (Année/Mois). Retiré de la liste d'attente une fois
