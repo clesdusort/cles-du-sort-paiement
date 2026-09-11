@@ -146,16 +146,6 @@ export default async function handler(req, res) {
         }
 
         factureInfo = { invoiceNumber, envoyee: true };
-
-        // Si la commande inclut la Guidance Mensuelle, on enregistre l'abonnée pour le futur
-        // prélèvement automatique du 5 de chaque mois.
-        if (Array.isArray(products) && products.includes('mensuelle')) {
-          try {
-            await enregistrerAbonnementMensuel({ customer: intent.customer, card: intent.card, email, client: clientInfo, dateCommande: new Date() });
-          } catch (abonnementErr) {
-            console.error('Erreur enregistrement abonnement Mensuelle (paiement déjà confirmé, non bloquant) :', abonnementErr);
-          }
-        }
       } catch (factureErr) {
         console.error('Erreur génération/envoi facture (paiement déjà confirmé, non bloquant) :', factureErr);
         factureInfo = { envoyee: false, erreur: String(factureErr) };
@@ -193,54 +183,10 @@ const LABELS_PRODUITS = {
 // (const PRODUCTS) et fixés côté serveur dans create-payment.js — utilisés ici uniquement pour
 // détailler le prix de chaque Guidance ligne par ligne sur la facture PDF.
 const PRIX_PRODUITS_CENTIMES = {
-  mensuelle: 3499,
-  personnalisee: 3999,
-  anniversaire: 4999,
+  mensuelle: 3600,
+  personnalisee: 4000,
+  anniversaire: 5000,
 };
-
-// ---------------------------------------------------------------------------------
-// Enregistre une nouvelle abonnée Mensuelle dans Upstash, pour le futur prélèvement
-// automatique du 5 de chaque mois. Le premier prélèvement RÉCURRENT ne doit jamais tomber
-// sur le mois déjà couvert par ce tout premier paiement (voir moisPremierEnvoiMensuelle) —
-// il cible donc le mois suivant celui-là.
-// ---------------------------------------------------------------------------------
-async function enregistrerAbonnementMensuel({ customer, card, email, client, dateCommande }) {
-  const url = process.env.KV_REST_API_URL;
-  const token = process.env.KV_REST_API_TOKEN;
-  if (!url || !token) throw new Error('Upstash non configuré');
-  if (!customer || !card) throw new Error('customer/card manquant sur cette intention de paiement');
-
-  const jour = dateCommande.getDate();
-  const decalage = jour <= 15 ? 1 : 2; // mois couvert par CE paiement (moisPremierEnvoiMensuelle)
-  const dPremierMoisCouvert = new Date(dateCommande.getFullYear(), dateCommande.getMonth() + decalage, 1);
-  // Le premier prélèvement RÉCURRENT vise le mois d'après celui déjà couvert :
-  const dPremierPrelevementRecurrent = new Date(dPremierMoisCouvert.getFullYear(), dPremierMoisCouvert.getMonth() + 1, 1);
-
-  const record = {
-    customer, card, email,
-    prenom: client && client.prenom ? client.prenom : '',
-    nom: client && client.nom ? client.nom : email,
-    adresse: client && client.adresse ? client.adresse : '',
-    codePostal: client && client.codePostal ? client.codePostal : '',
-    ville: client && client.ville ? client.ville : '',
-    pays: client && client.pays ? client.pays : 'France',
-    prochainMois: dPremierPrelevementRecurrent.getMonth(),
-    prochainAnnee: dPremierPrelevementRecurrent.getFullYear(),
-    statut: 'actif', // 'actif' | 'resiliation_demandee'
-    echecsConsecutifs: 0,
-    dateInscription: dateCommande.toISOString(),
-  };
-
-  const key = `abonnement_${customer}`;
-  await fetch(`${url}/set/${key}`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(record),
-  });
-  await fetch(`${url}/sadd/abonnements_actifs/${key}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-}
 
 function moisPremierEnvoiMensuelle(dateCommande) {
   const jour = dateCommande.getDate();
