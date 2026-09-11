@@ -14,7 +14,7 @@
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 
 const STANCER_API_BASE = 'https://api.stancer.com/v2';
-const MONTANT_MENSUELLE_CENTIMES = 3499;
+const MONTANT_MENSUELLE_CENTIMES = 3600;
 const SEUIL_ECHECS_DESACTIVATION = 3;
 
 const EMETTEUR = {
