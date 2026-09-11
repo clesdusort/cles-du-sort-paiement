@@ -14,9 +14,9 @@ const STANCER_API_BASE = 'https://api.stancer.com/v2'; // confirmé par la doc o
 // Tarifs des prestations — gardés ici, côté serveur, pour que le montant
 // ne puisse jamais être modifié depuis le navigateur du client.
 const PRODUCTS = {
-  mensuelle: { amount: 3499, label: 'Guidance Mensuelle', shortLabel: 'Mensuelle', currency: 'eur' },
-  personnalisee: { amount: 3999, label: 'Guidance Personnalisée', shortLabel: 'Personnalisée', currency: 'eur' },
-  anniversaire: { amount: 4999, label: 'Guidance Anniversaire', shortLabel: 'Anniversaire', currency: 'eur' },
+  mensuelle: { amount: 3600, label: 'Guidance Mensuelle', shortLabel: 'Mensuelle', currency: 'eur' },
+  personnalisee: { amount: 4000, label: 'Guidance Personnalisée', shortLabel: 'Personnalisée', currency: 'eur' },
+  anniversaire: { amount: 5000, label: 'Guidance Anniversaire', shortLabel: 'Anniversaire', currency: 'eur' },
 };
 
 export default async function handler(req, res) {
