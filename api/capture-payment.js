@@ -18,6 +18,7 @@
 //   KV_REST_API_TOKEN     — idem
 
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
+import { kv, marquerEmailUtilise } from './_promo.js';
 
 const STANCER_API_BASE = 'https://api.stancer.com/v2';
 
@@ -97,6 +98,33 @@ export default async function handler(req, res) {
       return res.status(502).json({ error: 'Erreur lors de la capture', details: captureResult });
     }
 
+    // 2 bis. Code promo : on relit côté serveur ce qui a été accordé à CETTE intention de
+    // paiement (écrit par create-payment.js) — jamais depuis le navigateur. On ne l'utilise
+    // que si le montant réellement encaissé correspond bien au total remisé enregistré.
+    // L'utilisation du code (1 par email) n'est comptée qu'ici, après capture réussie :
+    // un paiement abandonné ou refusé ne "brûle" donc pas le code de la cliente.
+    // Tout ce bloc est non bloquant : le paiement est déjà acquis.
+    let promo = null;
+    try {
+      const brut = await kv(['GET', `promo_dossier_${paymentIntentId}`]);
+      if (brut) {
+        const dossier = JSON.parse(brut);
+        const montantEncaisse = captureResult.amount || intent.amount || 0;
+        if (dossier && dossier.totalFinal === montantEncaisse) {
+          promo = dossier;
+          try {
+            await marquerEmailUtilise(dossier.email);
+          } catch (usageErr) {
+            console.error(`Code promo ${dossier.code} : utilisation non comptée pour ${dossier.email} (paiement confirmé, non bloquant) :`, usageErr);
+          }
+        } else {
+          console.error(`Dossier promo ignoré pour ${paymentIntentId} : montant encaissé (${montantEncaisse}) différent du total remisé enregistré.`);
+        }
+      }
+    } catch (promoErr) {
+      console.error('Erreur lecture du dossier promo (paiement déjà confirmé, non bloquant) :', promoErr);
+    }
+
     // 3. Facture : génération + envoi. Ne doit JAMAIS faire échouer la confirmation du
     // paiement (déjà acquis à ce stade) même en cas de problème sur cette partie.
     let factureInfo = null;
@@ -123,7 +151,7 @@ export default async function handler(req, res) {
         const cadeauProduitIds = (cadeau && Array.isArray(cadeau.produits))
           ? cadeau.produits.map(idProduitDepuisLibelle).filter(Boolean)
           : [];
-        const blocsGuidances = construireBlocsGuidances(products, new Date(), clientInfo, cadeauProduitIds, cadeau);
+        const blocsGuidances = construireBlocsGuidances(products, new Date(), clientInfo, cadeauProduitIds, cadeau, true, Boolean(promo));
 
         const pdfBytes = await genererFacturePDF({
           invoiceNumber,
@@ -132,9 +160,10 @@ export default async function handler(req, res) {
           products,
           description,
           amountEuros,
+          promo,
         });
 
-        await envoyerEmailFacture({ to: email, prenom: clientInfo.prenom, invoiceNumber, description, amountEuros, pdfBytes, blocsGuidances, products });
+        await envoyerEmailFacture({ to: email, prenom: clientInfo.prenom, invoiceNumber, description, amountEuros, pdfBytes, blocsGuidances, products, promo });
 
         // On garde aussi une copie dans Upstash, en attente que Carole l'archive dans son
         // appli locale (bouton "📁 Archiver les factures") — jamais perdue, même si son
@@ -230,7 +259,9 @@ function formatAdresseCadeau(personne) {
 // passe par le site, via inscription.html -> paiement.html) d'un futur prélèvement récurrent
 // du 5 du mois. Le futur moteur de prélèvement automatique (pas encore construit) devra
 // appeler cette même fonction avec estPremierPaiement=false pour les mois suivants.
-function construireBlocsGuidances(products, dateCommande, client, cadeauProduitIds, cadeau, estPremierPaiement = true) {
+// avecPromo (par défaut false) : quand un code promo a été utilisé, on précise le montant du
+// prélèvement suivant (36 €, plein tarif) pour qu'aucune cliente ne croie que la remise la suit.
+function construireBlocsGuidances(products, dateCommande, client, cadeauProduitIds, cadeau, estPremierPaiement = true, avecPromo = false) {
   if (!Array.isArray(products) || products.length === 0) return [];
   return products.map((id) => {
     const label = LABELS_PRODUITS[id] || id;
@@ -244,7 +275,9 @@ function construireBlocsGuidances(products, dateCommande, client, cadeauProduitI
       texte += estCadeauPourCetteGuidance
         ? `. Comme c'est un cadeau, cette lettre arrivera directement chez ${cadeau.nom}, à l'adresse indiquée (${formatAdresseCadeau(cadeau)}).`
         : (client && client.nom ? ` à l'adresse suivante : ${client.nom}, ${formatAdresseClient(client)}.` : '.');
-      texte += ' Le prélèvement suivant aura lieu automatiquement le 5 de chaque mois, sans que tu aies à refaire quoi que ce soit.';
+      texte += avecPromo
+        ? ' Le prélèvement suivant, de 36,00 € (la remise de ton code ne concerne que ce premier paiement), aura lieu automatiquement le 5 de chaque mois, sans que tu aies à refaire quoi que ce soit.'
+        : ' Le prélèvement suivant aura lieu automatiquement le 5 de chaque mois, sans que tu aies à refaire quoi que ce soit.';
     } else {
       texte = `${label} : sous environ deux semaines`;
       texte += estCadeauPourCetteGuidance
@@ -313,7 +346,7 @@ async function getNextInvoiceNumber(year) {
 // Génération du PDF de facture (mentions légales obligatoires pour un auto-entrepreneur
 // en franchise en base de TVA, vente B2C > 25€).
 // ---------------------------------------------------------------------------------
-async function genererFacturePDF({ invoiceNumber, date, client, products, description, amountEuros }) {
+async function genererFacturePDF({ invoiceNumber, date, client, products, description, amountEuros, promo }) {
   const pdfDoc = await PDFDocument.create();
   const page = pdfDoc.addPage([595.28, 841.89]); // A4 en points
   const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
@@ -377,6 +410,16 @@ async function genererFacturePDF({ invoiceNumber, date, client, products, descri
     page.drawText(`${ligne.montant} €`, { x: 470, y, size: 11, font, color: black });
     y -= 22;
   });
+
+  // Ligne de remise (uniquement si un code promo a été accordé ET que le détail des prestations
+  // est présent, sinon le montant affiché est déjà le total remisé). ⚠️ Trait d'union simple "-"
+  // et non "−" : la police Helvetica standard de pdf-lib ne gère pas le vrai signe moins.
+  if (promo && Array.isArray(products) && products.length) {
+    const remiseEuros = ((promo.remise || 0) / 100).toFixed(2).replace('.', ',');
+    page.drawText(`Remise code ${promo.code} (-${promo.pourcentage} %)`, { x: 50, y, size: 11, font, color: black, maxWidth: 380 });
+    page.drawText(`-${remiseEuros} €`, { x: 470, y, size: 11, font, color: black });
+    y -= 22;
+  }
   y -= 8;
 
   page.drawLine({ start: { x: 50, y: y + 10 }, end: { x: 545, y: y + 10 }, thickness: 1, color: gray });
@@ -401,7 +444,7 @@ async function genererFacturePDF({ invoiceNumber, date, client, products, descri
 // Envoi de l'email de confirmation + facture jointe, via l'API Resend. Toujours en
 // copie cachée à Carole (archive personnelle + trace de chaque envoi).
 // ---------------------------------------------------------------------------------
-async function envoyerEmailFacture({ to, prenom, invoiceNumber, description, amountEuros, pdfBytes, blocsGuidances, products }) {
+async function envoyerEmailFacture({ to, prenom, invoiceNumber, description, amountEuros, pdfBytes, blocsGuidances, products, promo }) {
   const resendKey = process.env.RESEND_API_KEY;
   if (!resendKey) {
     throw new Error('Clé Resend non configurée (RESEND_API_KEY manquante)');
@@ -434,7 +477,7 @@ async function envoyerEmailFacture({ to, prenom, invoiceNumber, description, amo
       subject: pluriel ? `C'est confirmé ✨ — tes lettres sont en préparation` : `C'est confirmé ✨ — ta lettre est en préparation`,
       html: `
         <p>${salutation}</p>
-        <p>C'est noté, et c'est confirmé : ton paiement pour <strong>${descriptionAvecArticle}</strong> (${amountEuros} €) est bien passé. Ta facture est en pièce jointe, pour tes archives.</p>
+        <p>C'est noté, et c'est confirmé : ton paiement pour <strong>${descriptionAvecArticle}</strong> (${amountEuros} €${promo ? `, avec ton code ${promo.code}` : ''}) est bien passé. Ta facture est en pièce jointe, pour tes archives.</p>
         <p>${pluriel ? 'Voici quand tu peux attendre tes lettres' : 'Voici quand tu peux attendre ta lettre'} :</p>
         ${listeGuidancesHtml}
         <p>${pluriel ? "De mon côté, je m'attelle déjà à tes lettres. Elles prendront la route vers ta boîte aux lettres bientôt !" : "De mon côté, je m'attelle déjà à ta lettre. Elle prendra la route vers ta boîte aux lettres bientôt !"}</p>
