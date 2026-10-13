@@ -9,6 +9,8 @@
 //   STANCER_SECRET_KEY = ta clé privée (stest_xxx en test, sprod_xxx en production)
 // Ne JAMAIS mettre cette clé dans un fichier committé sur GitHub.
 
+import { verifierCode, calculerRemise, kv } from './_promo.js';
+
 const STANCER_API_BASE = 'https://api.stancer.com/v2'; // confirmé par la doc officielle Stancer
 
 // Tarifs des prestations — gardés ici, côté serveur, pour que le montant
@@ -75,6 +77,28 @@ export default async function handler(req, res) {
     }
     const currency = products[0].currency; // toutes nos prestations sont en EUR
 
+    // Code promo (optionnel) : contrôle final côté serveur, indépendant de ce que la page a
+    // pu afficher. Sans code, rien ne change : montantFinal = totalAmount, comme avant.
+    // Un code refusé arrête tout AVANT de contacter Stancer, pour ne jamais encaisser le plein
+    // tarif à une cliente qui croit bénéficier d'une remise.
+    let promo = null;
+    let remiseCentimes = 0;
+    if (body.code) {
+      let verif;
+      try {
+        verif = await verifierCode({ code: body.code, email, emailRequis: true });
+      } catch (promoErr) {
+        console.error('Erreur vérification code promo :', promoErr);
+        return res.status(500).json({ error: 'Impossible de vérifier le code promo pour le moment. Réessaie dans un instant.' });
+      }
+      if (!verif.valide) {
+        return res.status(400).json({ error: verif.message });
+      }
+      promo = { code: verif.code, pourcentage: verif.pourcentage };
+      remiseCentimes = calculerRemise(totalAmount, verif.pourcentage);
+    }
+    const montantFinal = totalAmount - remiseCentimes;
+
     const secretKey = process.env.STANCER_SECRET_KEY;
     if (!secretKey) {
       return res.status(500).json({ error: 'Clé Stancer non configurée côté serveur' });
@@ -106,7 +130,7 @@ export default async function handler(req, res) {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        amount: totalAmount,
+        amount: montantFinal,
         currency,
         customer: customer.id,
         capture: false, // autorisation uniquement — la capture se fait dans un second temps
@@ -118,11 +142,32 @@ export default async function handler(req, res) {
       return res.status(502).json({ error: "Erreur création de l'intention de paiement", details: intent });
     }
 
+    // Si un code promo est appliqué, on mémorise côté serveur (Upstash, 24 h) ce qui a été
+    // accordé pour CETTE intention de paiement. capture-payment.js relit ce dossier pour la
+    // facture et pour compter l'utilisation du code : jamais depuis le navigateur.
+    // Si l'enregistrement échoue, on s'arrête ici : mieux vaut un paiement qui ne démarre pas
+    // qu'un paiement remisé sans trace (facture fausse, code non compté).
+    if (promo) {
+      try {
+        await kv(['SET', `promo_dossier_${intent.id}`, JSON.stringify({
+          code: promo.code,
+          pourcentage: promo.pourcentage,
+          remise: remiseCentimes,
+          totalFinal: montantFinal,
+          email,
+        }), 'EX', '86400']);
+      } catch (dossierErr) {
+        console.error('Erreur enregistrement du dossier promo :', dossierErr);
+        return res.status(500).json({ error: "Impossible d'enregistrer ton code promo. Réessaie dans un instant." });
+      }
+    }
+
     // On renvoie au front uniquement ce dont il a besoin (jamais la clé secrète)
     return res.status(200).json({
       paymentIntentId: intent.id,
       hppUrl: intent.url, // URL de la page de paiement hébergée, à afficher en iframe
-      totalAmount,
+      totalAmount: montantFinal,
+      promo: promo ? { code: promo.code, pourcentage: promo.pourcentage, remise: remiseCentimes } : null,
       description,
       productLabels: fullLabels,
       products: uniqueIds,
